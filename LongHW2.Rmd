@@ -1,0 +1,1650 @@
+---
+title: "MAT3373: Long Homework #2"
+author: "Charie Brady (300043672)"
+date: "10/04/2021"
+output: html_document
+---
+```{r include=FALSE}
+
+library(ggplot2)
+library(lattice)
+library(caret)
+library(glmnet)
+library(tidyverse)
+library(leaps)
+library(pROC)
+library(stringr)
+
+```
+
+
+### Question 1
+
+**Load the mnist.csv dataset. This is exactly the training dataset that you used in HW1, where you fit several knn models to this dataset and found a “best” value of k. In this problem, you will estimate the error of this procedure using cross-validation:**
+
+```{r}
+
+mnist_data = read.csv("mnist.csv")
+
+```
+
+**(1) Do 3-fold cross-validation, using this single value of k for the knn model. Report the estimated error. **
+
+```{r}
+
+set.seed(123) 
+
+train_control <- trainControl(method = "cv", number = 3)
+
+knn_model <- train(label ~., data = mnist_data, tuneGrid = data.frame(k=3), 
+               method = "knn", trControl = train_control)
+knn_model
+
+```
+
+The 3-fold CV error: $RMSE = 0.87$
+
+**(2) Open HW1, where you trained on the same dataset and found the test error. How do these results compare? How would you expect them to compare in general?**
+
+The estimated error through 3-fold cross-validation is relatively low. This is expected when compared with a validation-set approach for two reasons. 
+
+First, the KNN classifier is trained over the entire data set through cross-validation, and generally models that are trained on more data perform better and have lower errors. Since the validation-set approach used in HW1 trained the model on less data, the error is expected to be an overestimate of the true error.
+
+Second, the validation-set approach to estimating the error suffers from higher variability given that its estimate can change depending on where the data is split and which data points are included in the train and test sets. Since 3-fold cross-validation takes an average of three error estimates, the estimate will be less variable and closer to the true error. 
+
+Overall, it is expected that the estimated error is smaller using n-fold CV compared to the validation-set approach used in HW1.
+
+### Question 2
+
+**Download the red wine dataset from: https://archive.ics.uci.edu/ml/datasets/wine+quality. Your goal in this question is to predict wine quality based on all other variables.**
+
+```{r}
+
+set.seed(50)
+
+wine_data = read.csv("winedata_split.csv")
+head(wine_data)
+
+```
+
+Quick view of the columns, and check of the wine data set row count.  
+
+```{r}
+
+nrow(wine_data)
+
+```
+
+**(1) Split the data set into a training set and a test set.**
+
+```{r}
+
+set.seed(100)
+
+index <- createDataPartition(wine_data$quality, p = .5,
+                                  list = FALSE,
+                                  times = 1)
+wine_data_train <- wine_data[index,]
+wine_data_test <- wine_data[-index,]
+
+nrow(wine_data_train)
+nrow(wine_data_test)
+
+```
+  
+**(2) For each of the following, fit the given model, report any hyperparameters chosen, and report the test error.**
+  
+**(a) Fit a linear model using least squares.**
+
+```{r}
+
+linear_fit = lm(quality~., data=wine_data_train)
+
+summary(linear_fit)
+
+predictions <- linear_fit %>% predict(wine_data_test)
+
+
+```
+
+The test error for the linear fit (all covariates included) is $RMSE = 0.66$, or $MSE = 0.435$.
+
+```{r}
+
+RMSE(predictions, wine_data_test$quality)
+
+```
+
+**(b) Fit a ridge regression model on the training set, with hyperparameter** $λ$ **chosen by cross-validation on the training data.**
+
+```{r}
+
+set.seed(11)
+
+x = model.matrix(quality~.-1,data=wine_data_train)
+y = wine_data_train$quality
+
+fit_ridge = glmnet(x, y, alpha = 0)
+plot(fit_ridge, xvar = "lambda", label = TRUE)
+
+cv_ridge = cv.glmnet(x, y, alpha = 0)
+plot(cv_ridge)
+cv_ridge$lambda.min
+ridge_predictions <- predict(cv_ridge, newx = model.matrix(quality~.-1,data=wine_data_test), s = "lambda.min")
+RMSE(ridge_predictions, wine_data_test$quality)
+
+```
+
+Based on the 10-fold cross validation used above, the hyperparameter chosen is $λ = 0.04044944$ which produced a training $MSE ≃ 0.43$. This fitted model has nearly the same test error, $MSE = 0.432$. 
+
+**(c) Fit a lasso model on the training set, with hyperparameter** $λ$ **chosen by cross-validation.**
+
+```{r}
+
+fit_lasso = glmnet(x, y, alpha = 1)
+#plot(fit_lasso, xvar = "lambda", label = TRUE)
+
+cv_lasso = cv.glmnet(x, y, alpha = 1)
+plot(cv_lasso)
+
+cv_lasso$lambda.min
+cv_lasso$lambda.1se
+coef(cv_lasso, s = "lambda.1se")
+lasso_predictions <- predict(cv_lasso, newx = model.matrix(quality~.-1,data=wine_data_test), s = "lambda.1se")
+RMSE(lasso_predictions, wine_data_test$quality)
+
+```
+
+Based on the cross-validation used above, the chosen hyperparameter is $λ = 0.08318477$. The 'one standard error' fit is chosen, rather than the minimum, as the minimum includes all 11 covariates while the chosen model only includes 3. Since the errors are fairly similar, it makes sense to go with a simpler model with higher interpretability. This reduced fitted model has a test error of $MSE = 0.4534$.
+
+**(d) Use regsubsets to choose the best linear model using forward and backward stepwise regression.**
+
+Forward fit on training data.
+
+```{r}
+
+set.seed(5)
+
+fit_regforward = regsubsets(quality~., data = wine_data_train, nvmax = 11, method = "forward")
+plot(fit_regforward, scale="Cp")
+summary(fit_regforward)
+
+```
+
+Backward stepwise selection on training data.
+
+```{r}
+
+fit_regbackward = regsubsets(quality~., data = wine_data_train, nvmax = 11, method = "backward")
+plot(fit_regforward, scale="Cp")
+summary(fit_regbackward)
+
+```
+
+Evaluating the test MSE for all variable lengths from forward selection fit. 
+
+```{r}
+
+test_matrix_f = model.matrix(quality∼., data = wine_data_test)
+
+test_errors_f = rep(NA ,11)
+  for(i in 1:11){
+  coefi = coef(fit_regforward, id = i)
+  pred = test_matrix_f[,names(coefi)]%*%coefi
+  test_errors_f[i] = mean((wine_data_test$quality-pred)^2)
+  }
+
+test_errors_f
+plot(test_errors_f)
+which.min(test_errors_f)
+coef(fit_regforward, 6)
+
+```
+
+For forward selection, the six variable model has the lowest error. 
+
+Evaluating the test MSE for all variable lengths from backward selection fit. 
+
+```{r}
+
+x = model.matrix(quality~.-1,data=wine_data_train)
+y = wine_data_train$quality
+
+test_matrix_b = model.matrix(quality∼., data = wine_data_test)
+
+test_errors_b = rep(NA ,11)
+  for(i in 1:11){
+  coefi = coef(fit_regbackward, id = i)
+  pred = test_matrix_b[,names(coefi)]%*%coefi
+  test_errors_b[i] = mean((wine_data_test$quality-pred)^2)
+  }
+
+test_errors_b
+plot(test_errors_b)
+which.min(test_errors_b)
+
+```
+
+Using forward selection, the best model is reduced to only six variables, with an error of $MSE = 0.433$. However, with backward selection, the best model includes all eleven variables, with an error of $MSE = 0.435$. The forward selection model is chosen since the model contains fewer variables, and is therefore a little easier to interpret.
+
+**(3) Comment on the results obtained. How accurately can we predict wine quality? Is there much difference among the test errors resulting from these approaches? Are the models themselves similar?**
+
+The linear model had an MSE test error of $0.43$. It identified six significant variables with p-values $\le 0.05$ (three highly significant with p-values $\le 0.001$). 
+
+The ridge model had an MSE of $0.43$ and, of course, included all eleven variables. 
+
+The lasso model had an MSE of $0.45$ and included three variables, the same three that were shown to have the highest significance in the linear model (p-values $\le 0.001$). 
+
+The model from using forward stepwise selection had an MSE of $0.43$ and included six variables, but not the same six that were the most significant from the linear model (four highly significant variables identified in linear regression, but also two that had low significance, p-values $> 0.1$)
+
+The model from using backward stepwise selection had an MSE of $0.43$ and included all eleven variables. 
+
+The best model is the three-variable model chosen by lasso, as it has a similar MSE as the others ($~0.02$ difference) and has far fewer variables than the others. All of the models have similar errors, all models included the three highly significant variables included in lasso, but the other models include insignificant variables with little improvement in predictability. 
+
+### Question 3
+
+**(a) Generate a simulated data set. What is $n$ and what is $p$? Write out the model used to generate the data in equation form. ** 
+
+
+```{r}
+
+set.seed(1)
+
+X <- rnorm(100)
+Y <- X - 2 * X^2 + rnorm(100)
+
+```
+
+
+$$n = 100$$
+
+$$p = 2$$
+
+$$Y = X - 2X^2 + \varepsilon$$
+
+
+
+**(b) Create a scatterplot of $X$ against $Y$. Comment on what you find.**
+
+```{r}
+
+plot(X, Y)
+
+```
+
+Clearly there is a non-linear relationship, a negative quadratic shape. Of course, these points were generated from a negative quadratic equation so this is expected.
+
+**(c) Set a random seed, and then compute the LOOCV errors that result from fitting the following four models using least squares: **
+
+$i. Y = \beta_{0} + \beta_{1}X + \varepsilon$
+
+```{r}
+
+set.seed(2)
+
+df <- data.frame(X, Y)
+
+train.control <- trainControl(method = "LOOCV")
+
+model1 <- train(Y ~ X, data = df, method = "lm", trControl = train.control)
+
+print(model1)
+
+```
+
+$ii. Y = \beta_{0} + \beta_{1}X + \beta_{2}X^2 + \varepsilon$
+
+```{r}
+
+model2 <- train(Y ~ poly(X, 2), data = df, method = "lm", trControl = train.control)
+
+print(model2)
+
+```
+
+$iii. Y = \beta_{0} + \beta_{1}X + \beta_{2}X^2 + \beta_{3}X^3 + \varepsilon$
+
+```{r}
+
+model3 <- train(Y ~ poly(X, 3), data = df, method = "lm", trControl = train.control)
+
+print(model3)
+
+```
+
+$iv.   Y = \beta_{0} + \beta_{1}X + \beta_{2}X^2 + \beta_{3}X^3 + \beta_{4}X^4 + \varepsilon$
+
+```{r}
+
+model4 <- train(Y ~ poly(X, 4), data = df, method = "lm", trControl = train.control)
+
+print(model4)
+
+```
+
+
+**(d) Repeat (c) using another random seed, and report your results. Are your results the same as what you got in (c)? Why?**
+
+```{r}
+
+set.seed(50)
+
+model5 <- train(Y ~ X, data = df, method = "lm", trControl = train.control)
+model6 <- train(Y ~ poly(X, 2), data = df, method = "lm", trControl = train.control)
+model7 <- train(Y ~ poly(X, 3), data = df, method = "lm", trControl = train.control)
+model8 <- train(Y ~ poly(X, 4), data = df, method = "lm", trControl = train.control)
+
+print(model5)
+print(model6)
+print(model7)
+print(model8)
+
+```
+
+The results are the same as in (c) despite a different seed. This is because in the LOOCV procedure, there are $n$ folds, meaning every data point is tested against a fit of $n-1$ points. If the data has not changed, then the resulting errors will be same each time LOOCV is run. 
+
+**(e) Which of the models in (c) had the smallest LOOCV error? Is this what you expected? Explain your answer.**
+
+The second model, the quadratic, had the lowest LOOCV error of $RMSE = 0.968$ (or $MSE = 0.937$). This shows that LOOCV chose the correct model, given that the data generating process is a quadratic. 
+
+
+**(f) Comment on the statistical significance of the coefficient estimates that results from fitting each of the models in (c) using least squares. Do these results agree with the conclusions drawn based on the cross-validation results?**
+
+```{r}
+
+summary(model4)
+
+```
+
+Based on the above p-values for each coefficient, only the linear and quadratic variables are statistically significant, which is consistent with the LOOCV error being lowest for the quadratic equation. 
+
+### Question 4
+
+**(1) Load the data GWAS.csv, and split it into equal-sized testing and training datasets. The first column is the indicator function of a disease. The remaining columns are indicator functions for a collection of alleles that have been studied. Fit a standard logistic regression model to the training set and apply to the testing set. Summarize the model fit and the performance of the model on the test data.**
+
+Random splitting into equal-sized train and test data sets (with stratified V1). 
+
+```{r}
+
+GWAS_data = read.csv("GWAS.csv")
+GWAS_data = GWAS_data[,-1]
+
+set.seed(105)
+
+i <- createDataPartition(GWAS_data$V1, p = .5,
+                                  list = FALSE,
+                                  times = 1)
+GWAS_data_train <- GWAS_data[i,]
+GWAS_data_test <- GWAS_data[-i,]
+
+nrow(GWAS_data_train)
+nrow(GWAS_data_test)
+
+summary(GWAS_data_train$V1)
+
+fit_log = glm(V1~., data = GWAS_data_train, family=binomial)
+
+predictions_log = predict(fit_log, data = GWAS_data_test, type="response")
+predictions_log[1:10]
+
+RMSE(predictions_log, GWAS_data_test$V1)
+
+predictions_log = ifelse(predictions_log > 0.5, 1, 0)
+```
+
+```{r include=FALSE}
+attach(GWAS_data_test)
+```
+
+```{r}
+
+table(predictions_log, V1)
+
+mean(predictions_log == V1)
+
+```
+
+$Accuracy: 0.55$
+
+$Error: 0.45$
+
+$Precision: 179/(179 + 335) = 0.348$
+
+$Recall/sensitivity: 179/(179 + 340) = 0.345$
+
+$Specificity: 335/(646 + 335) = 0.341$
+
+$Negative Predictive Value = 646/(646 + 340) = 0.655$
+
+The accuracy of the logisitic regression model is 55%, which is close to chance given a binary dependent variable. Precision and recall are poor (~34%), while negative predictive value is better (~65%). It might appear that the model does a better job than 'chance' at predicting negative outcomes, but our data is imbalanced and skewed towards negative outcomes (~65% of our test set). Comparing the class proportions between the data and predictions, they are basically the same (65/35 split in the data set, and 66/34 split in predicted values). 
+
+**(2) Repeat the previous step, but this time use Lasso or ridge regression. Compare the results.**
+
+```{r}
+
+x = model.matrix(V1~.-1, data = GWAS_data_train)
+y = GWAS_data_train$V1
+
+fit_lasso_log = glmnet(x, y, alpha = 1, family = "binomial")
+
+plot(fit_lasso_log, xvar = "lambda", label = TRUE)
+
+cv_lasso_log = cv.glmnet(x, y, alpha = 1)
+
+plot(cv_lasso_log)
+
+#coef(cv_lasso_log, s = "lambda.min")
+
+lasso_predictions_log <- predict(cv_lasso_log, newx = model.matrix(V1~.-1,data=GWAS_data_test), s = "lambda.min")
+lasso_predictions_log = ifelse(lasso_predictions_log > 0.5, 1, 0)
+```
+
+```{r include=FALSE}
+attach(GWAS_data_test)
+```
+
+```{r}
+
+table(lasso_predictions_log, V1)
+
+mean(lasso_predictions_log == V1)
+
+```
+
+$Accuracy: 0.671$
+
+$Error: 0.329$
+
+$Precision: 85/(85 + 59) = 0.59$
+
+$Recall/sensitivity: 85/(85 + 434) = 0.164$
+
+$Specificity: 59/(59 + 922) = 0.06$
+
+$Negative Predictive Value = 922/(922 + 434) = 0.68$
+
+The logistic regression model using lasso reduced the number of covariates to 16 (using the minimum error model found through cross validation). The accuracy is higher than the previous logistic regression model (~67% compared to 55%), and precision is higher (59% compared to ~35%). Precision is the percentage of correctly predicted positive cases out of total predicted positive cases, so this looks like an improvement. However, this might be due to the fact that the model simply predicts fewer positive cases overall, as the false negatives are higher than in the previous model (434 vs 340), which might matter more given the domain. Recall and specificity are much worse in this model, 16% and 6% respectively, compared to ~34% each in the previous model. Recall is the percentage of positive cases that were correctly identified, so having a lower recall is likely worse than having more false positives, given that this is used for disease screening. 
+
+The improvement is due to the model predicting negative more often than the previous model (90% of predictions were negative, compared to 66%). Interestingly, the 'one standard error' model that is chosen by default for this CV fit reduced the model to only two variables, and guessed negative 100% of the time. The accuracy was exactly proportionate to the number of negative cases in the data (65%). A similar predictive pattern is seen here. 
+
+**(3) Draw an estimate of the ROC curve for the best method you used. Describe any interesting features.**
+
+I will naively chose the lasso model based on higher accuracy alone. I will not assume any domain-specific preference for certain evaluation metrics in this part.  
+
+```{r}
+
+roc_curve <- roc(GWAS_data_test$V1, lasso_predictions_log,
+            smoothed = TRUE,
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+```
+
+The curve does not have a strong arc and is nearing the middle line, which indicates a "no information" model (unable to differentiate positive cases). It is (slightly) better than the previous model below. 
+
+```{r}
+
+roc_curve2 <- roc(GWAS_data_test$V1, predictions_log,
+            smoothed = TRUE,
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+```
+
+**(4) You wish to use your model for screening. This means measuring a small number of variables, then forwarding a small fraction of people for further testing. Based on funding considerations, you wish to forward roughly 1 percent of the population for further testing. Describe a decision procedure based on the model you used in the previous step. Does the plotted ROC curve influence your choice?**
+
+Generally, a model with a low recall/sensitivity is considered dangerous for screening for life-critical disease. However, given that the purpose of this prediction is to send only one percent of the tested population for further testing, I would argue that precision is a more important metric. It is more important that those sent for testing are actually positive cases, rather than attempting to detect every positive case in our test population. Based on the above test results, ~10% of the test population were predicted positive, and of those, 59% were actually positive, which is better than a chance guess based on the prior for positive cases (~35% of the population based on this data). This gives us a ~5% true positive, well above the 1% needed (assuming the data is reflective of the general population), so it is seemingly capable of detecting enough true positives for this purpose. Based on this preference for precision over recall/sensitivity, the lasso model is better (59% precision compared to 35% for the other model). 
+
+Furthermore, the lasso model has far fewer variables - 16 compared to 500. This is certainly an important consideration if one can only measure a small number of variables for testing. The ROC curve does not tell us a lot given that it is not strongly curved, but having some arc here is better than none, given that a higher recall/sensitivity is ideal. 
+
+
+
+### Question 5
+
+**I begin by describing the dataset and the problem. Load the dataset SchoolCorrect.csv and display some parts of it. The rows correspond to student, and each student i comes with the following information:**
+
+**(1) The school they belong to (from 1 to 6), which I will denote** $S_i$.
+
+**(2) The student’s test score on a standardized test after some standardization/centering, which I will denote ** $T_i$.
+
+**To set notation, I will denote by** $N(j) = {i : S_i = j}$ **the students in school** $j$**. The scientific questions we will try to answer are: which school is the “best,” and how confident are we in our comparisons?**
+
+```{r}
+
+set.seed(1)
+
+school_data = read.csv("SchoolCorrect.csv")
+head(school_data)
+nrow(school_data)
+
+test_scores <- school_data$Test.Score
+#test_scores
+
+```
+
+
+**(1) We will start with naive estimates. For each school** $j ∈ {1, 2, . . . , 6}$**, fit the simple model**
+
+$$T_i ∼ N(β_j, 5^2), i ∈ N(j).$$
+**This model has 1 parameter,** $β_j$**, and there are 6 schools, so in total you should be estimating (1)(6) = 6 parameters in this part of the question. Finally, rank the schools according to the magnitude of** $β_j$**.**
+
+```{r}
+
+means<-data.frame(rep(1:6),rep(0,6), rep(0,6), rep(0,6), rep(0,6), rep(0, 6))
+names(means) <- c("School j", "βj Estimate", "Rank", "|N(j)|", "Corrected βj Estimate ", "Corrected Rank")
+for(i in 1:6){
+  means[i,2]<-mean(school_data$Test.Score[school_data$School.ID == i])
+  means[i,4]<- sum(school_data$School.ID == i)
+}
+
+means[,3] = rank(-means[,2])
+means
+
+```
+
+**(2) We will next use Bayesian methods to compute “corrected” estimates. Observe that** $|N(j)|$ **varies a great deal - some schools are much bigger than others. Using Markov chain Monte Carlo or otherwise, sample from the posterior distribution and compute credible sets for** $β_1, . . . , β_6$**.**
+
+```{r}
+
+set.seed(1)
+
+MH<-function(theta0,T,r,data,prior,likelihood){
+  res = rep(theta0,T+1)
+  
+  
+  for(i in 1:T){
+    prop = res[i] + runif(1,-r,r)
+    numerator = prior(prop)*likelihood(prop,data)
+    denominator = prior(res[i])*likelihood(res[i],data)
+    if(runif(1,0,1) < numerator/denominator){
+      res[i+1] = prop
+    } else{
+      res[i+1] = res[i]
+    }
+  }
+  return(res)
+}
+
+CInt<-function(sample,alpha){
+  ord = sort(sample)
+  n = length(sample)
+  return(c(ord[floor(n*alpha/2)],ord[floor(n*(1-alpha/2))]))
+}
+```
+
+```{r}
+
+set.seed(1)
+
+prior<-function(beta){
+  s = runif(1, 1, 50)
+  return(dnorm(beta, 0, s))
+}
+
+likelihood<-function(beta,data){
+  n = length(data)
+  res = 1
+  for(i in 1:n) {
+    res = res*dnorm(data[i]-beta,beta,5)
+  }
+  return(res)
+}
+```
+
+
+```{r}
+
+set.seed(2)
+for(i in 1:6){
+  true_beta <- means[i,2]
+  test = rnorm(10, true_beta, 5)
+  
+  T = means[i,4]
+  r=0.2
+  Sample = MH(0,T,r,test,prior,likelihood)
+  means[i,5] <- mean(Sample)
+  label = paste("Beta", i, "Mean Parameter")
+  plot(density(Sample), main= "Density of Posterior", xlab=label)
+  
+}
+
+means
+
+```
+
+**(3) Using your samples from the posterior distribution, rank the 6 schools by the expected value of** $β_i$**. Compare this ranking to the naive estimate from part 1 of the question.**
+
+```{r}
+
+means[,6] = rank(-means[,5])
+means
+
+```
+
+Based on the corrected $B_j$ estimates and rankings in the table, the top-ranked school is now school 6, and the previous top-ranked school (school 1) is ranked 4th. This makes more sense than the previous naive estimates given that school 6 has a positive mean with $|N(6)| = 5000$, whereas school 1 has a positive mean with $|N(1)| = 6$, and so school 1 has an unreliable estimate and so the model corrects it closer to the prior mean of $0$. The estimates that deviate furthest from the prior mean of 0 are the schools with greater number of test scores. 
+
+**(4) Posterior distributions can be used to describe uncertainty in a ranking. Compute the probability (according to the posterior distribution) that your estimate of the top-ranked school is really the top-ranked school.**
+
+```{r}
+
+true_beta = 1.68941233
+test = rnorm(10, true_beta, 5)
+  
+T = 5000
+r=0.2
+Sample = MH(0,T,r,test,prior,likelihood)
+
+CInt(Sample, 0.05)
+true_beta
+
+```
+
+The new estimate for the top-ranked school is $β_6 = ~1.69$. Given the 95% credible interval, the value of $β_6$ falls somewhere between $[0.29, 4.91]$ 95% of the time with repeated sampling. So we can say that we have evidence to believe that the mean test score for school 6 is $>0$ based on this credible interval, but we cannot conclude that it is the top-ranked school given the wide range of possible values, and that on the lower end, $β_6 = 0.29$, the mean is less than that of other schools. In other words, there is too much overlap between credible intervals to be confident which school is truly first rank. (The various density plots can be seen above.) Choice of prior will also change the estimation.
+
+### Question 6
+
+**(1) Fix n = 25 and N large. Simulate samples and then make the following three plots: k vs Bias, k vs Var, and k vs MSE.**
+
+```{r}
+
+library(class)
+
+set.seed(10)
+
+n = 25
+N = 100
+k = 45
+
+X = runif(n*N,0,2*pi)
+Y = sin(X) + rnorm(n*N, 0, 0.35)
+X_cor <- c(X)
+Y_cor <- c(Y)
+x <- rep(0,n*N)
+
+df_points <- data.frame(X_cor, Y_cor, x)
+df_points[1:5,]
+
+plot(X, Y)
+
+knn_func<-function(x, df, k){
+  for(i in 1:nrow(df)){
+    df[i,3] <- sqrt(((x - df[i,1]))^2)
+  }
+  ordered_df <- df[order(df[,3]),]
+  Yk <-ordered_df[1:k,2]
+  return(mean(Yk))
+}
+
+pred<-knn_func(1.5, df_points, 2)
+pred
+
+knn_mse<-function(y_hat, y) {
+  mean((y_hat - y)^2)
+}
+
+knn_var<-function(y_hat, y){
+  (y_hat - knn_mean(y))^2
+}
+
+knn_bias<-function(y){
+  (knn_mean(y) - y)^2
+}
+
+knn_mean<-function(x){
+  mean(x)
+}
+
+get_sim_data = function(sample_size = n) {
+  x = runif(n*5, 0, 2*pi)
+  y = sin(x) + rnorm(n*5, 0, 0.35)
+  data.frame(x, y)
+}
+
+x_p = data.frame(x_p = 1)
+y_p = sin(1)
+predictions = matrix(0, nrow = 5, ncol = k)
+
+for (sim in 1:5) {
+  sim_data = get_sim_data(n)
+  predictions[sim, 1] = knn_func(x_p, sim_data, 1)
+  predictions[sim, 2] = knn_func(x_p, sim_data, 3)
+  predictions[sim, 3] = knn_func(x_p, sim_data, 5)
+  predictions[sim, 4] = knn_func(x_p, sim_data, 7)
+  predictions[sim, 5] = knn_func(x_p, sim_data, 9)
+  predictions[sim, 6] = knn_func(x_p, sim_data, 11)
+  predictions[sim, 7] = knn_func(x_p, sim_data, 13)
+  predictions[sim, 8] = knn_func(x_p, sim_data, 15)
+  predictions[sim, 9] = knn_func(x_p, sim_data, 17)
+  predictions[sim, 10] = knn_func(x_p, sim_data, 19)
+  predictions[sim, 11] = knn_func(x_p, sim_data, 21)
+  predictions[sim, 12] = knn_func(x_p, sim_data, 23)
+  predictions[sim, 13] = knn_func(x_p, sim_data, 25)
+  predictions[sim, 14] = knn_func(x_p, sim_data, 27)
+  predictions[sim, 15] = knn_func(x_p, sim_data, 29)
+  predictions[sim, 16] = knn_func(x_p, sim_data, 31)
+  predictions[sim, 17] = knn_func(x_p, sim_data, 33)
+  predictions[sim, 18] = knn_func(x_p, sim_data, 35)
+  predictions[sim, 19] = knn_func(x_p, sim_data, 37)
+  predictions[sim, 20] = knn_func(x_p, sim_data, 39)
+  predictions[sim, 21] = knn_func(x_p, sim_data, 41)
+  predictions[sim, 22] = knn_func(x_p, sim_data, 43)
+  predictions[sim, 23] = knn_func(x_p, sim_data, 45)
+  predictions[sim, 24] = knn_func(x_p, sim_data, 47)
+  predictions[sim, 25] = knn_func(x_p, sim_data, 49)
+  predictions[sim, 26] = knn_func(x_p, sim_data, 51)
+  predictions[sim, 27] = knn_func(x_p, sim_data, 53)
+  predictions[sim, 28] = knn_func(x_p, sim_data, 55)
+  predictions[sim, 29] = knn_func(x_p, sim_data, 57)
+  predictions[sim, 30] = knn_func(x_p, sim_data, 59)
+  predictions[sim, 31] = knn_func(x_p, sim_data, 61)
+  predictions[sim, 32] = knn_func(x_p, sim_data, 63)
+  predictions[sim, 33] = knn_func(x_p, sim_data, 65)
+  predictions[sim, 34] = knn_func(x_p, sim_data, 67)
+  predictions[sim, 35] = knn_func(x_p, sim_data, 69)
+  predictions[sim, 36] = knn_func(x_p, sim_data, 71)
+  predictions[sim, 37] = knn_func(x_p, sim_data, 73)
+  predictions[sim, 38] = knn_func(x_p, sim_data, 75)
+  predictions[sim, 39] = knn_func(x_p, sim_data, 77)
+  predictions[sim, 40] = knn_func(x_p, sim_data, 79)
+  predictions[sim, 41] = knn_func(x_p, sim_data, 81)
+  predictions[sim, 42] = knn_func(x_p, sim_data, 83)
+  predictions[sim, 43] = knn_func(x_p, sim_data, 85)
+  predictions[sim, 44] = knn_func(x_p, sim_data, 87)  
+  predictions[sim, 45] = knn_func(x_p, sim_data, 89) 
+}
+
+# Plot MSE n = 25, N = 5
+
+k_col_m <- seq(1, by = 2, len = k)
+k_MSE <- rep(0, k)
+mse_set <- data.frame(k_col_m, k_MSE)
+
+for(i in 1:k){
+  mse_set[i, 2] <- knn_mse(y_p, predictions[,i])
+}
+
+plot(mse_set, xlab = "K", ylab = "MSE", main = "MSE as K varies (n = 25, N = 5)")
+
+```
+
+```{r}
+
+k2 = 12
+
+x_p = data.frame(x_p = 1)
+y_p = sin(1)
+predictions = matrix(0, nrow = N, ncol = k2)
+
+for (sim in 1:N) {
+  sim_data = get_sim_data(n)
+  predictions[sim, 1] = knn_func(x_p, sim_data, 1)
+  predictions[sim, 2] = knn_func(x_p, sim_data, 2)
+  predictions[sim, 3] = knn_func(x_p, sim_data, 3)
+  predictions[sim, 4] = knn_func(x_p, sim_data, 4)
+  predictions[sim, 5] = knn_func(x_p, sim_data, 5)
+  predictions[sim, 6] = knn_func(x_p, sim_data, 6)
+  predictions[sim, 7] = knn_func(x_p, sim_data, 7)
+  predictions[sim, 8] = knn_func(x_p, sim_data, 8)
+  predictions[sim, 9] = knn_func(x_p, sim_data, 9)
+  predictions[sim, 10] = knn_func(x_p, sim_data, 10)
+  predictions[sim, 11] = knn_func(x_p, sim_data, 11)
+  predictions[sim, 12] = knn_func(x_p, sim_data, 12)
+}
+
+# Plot MSE n = 25, N = 100
+
+k_col_m <- rep(1:k2)
+k_MSE <- rep(0, k2)
+mse_set <- data.frame(k_col_m, k_MSE)
+
+for(i in 1:k2){
+  mse_set[i, 2] <- knn_mse(y_p, predictions[,i])
+}
+
+plot(mse_set, xlab = "K", ylab = "MSE", main = "MSE as K varies (n = 25, N = 100)")
+
+
+# Plot VAR n = 25, N = 100
+
+k_col_v <- rep(1:k2)
+k_VAR <- rep(0, k2)
+var_set <- data.frame(k_col_v, k_VAR)
+
+for(i in 1:k2){
+  var_set[i, 2] <- knn_var(y_p, predictions[,i])
+}
+
+plot(var_set, xlab = "K", ylab = "VAR", main = "VAR as K varies (n = 25, N = 100)")
+
+```
+
+**(2) In the previous question, you should find that the sample MSE is large when k is too small and when k is too big, obtaining a minimum somewhere in the middle. Find the optimal value of k. Also give an informal argument as to why your choices of N, k in the previous question are likely “good enough” to have confidence in your answer**
+
+For some data, when $k$ is small (say, $k < 3$) the model is too flexible to make accurate predictions on test data - it suffers from overfitting and high variance - and so the MSE is high. When $k$ is sufficiently large the model can become too inflexible and does not fit the shape of the underlying model - it suffers from high bias - and so MSE suffers as well. This is known as the bias-variance trade-off.
+
+The minimum MSE here occurs when $k = 11$. However, there is not a large difference between $k = 6$ and $k = 11$ error, so perhaps $k = 6$ is optimum as it is computationally simpler with quite similar accuracy.
+
+The first model, I chose $N = 5$ and $n = 25$, meaning the model averages over 5 sample estimates of 25 data points. I fit 45 $k$ values (1 to 89). I was curious to see the behavior when $k$ becomes large when both $N$ and $n$ are relatively small.  
+
+For the $k = 12$ model, I chose $N = 100$. As N becomes sufficiently large, it becomes much more accurate even as n varies, based on the unlikeliness of finding 100 estimates from 100 samples that are all very far off from the mean when averaged (given that there is no measurement error and the irreducible errors are normal).
+
+**(3) Repeat the optimization procedure in parts (1,2) of this question, this time with n = 100. Does the value of k change? In what direction does it go? In light of this evidence, predict what would happen if you did the same procedure with n = 10000.**
+
+```{r}
+
+n3 = 100 
+k3 = 12
+
+x_p = data.frame(x_p = 1)
+y_p = sin(1)
+predictions = matrix(0, nrow = N, ncol = k3)
+
+for (sim in 1:N) {
+  sim_data = get_sim_data(n3)
+  predictions[sim, 1] = knn_func(x_p, sim_data, 1)
+  predictions[sim, 2] = knn_func(x_p, sim_data, 2)
+  predictions[sim, 3] = knn_func(x_p, sim_data, 3)
+  predictions[sim, 4] = knn_func(x_p, sim_data, 4)
+  predictions[sim, 5] = knn_func(x_p, sim_data, 5)
+  predictions[sim, 6] = knn_func(x_p, sim_data, 6)
+  predictions[sim, 7] = knn_func(x_p, sim_data, 7)
+  predictions[sim, 8] = knn_func(x_p, sim_data, 8)
+  predictions[sim, 9] = knn_func(x_p, sim_data, 9)
+  predictions[sim, 10] = knn_func(x_p, sim_data, 10)
+  predictions[sim, 11] = knn_func(x_p, sim_data, 11)
+  predictions[sim, 12] = knn_func(x_p, sim_data, 12)
+}
+
+# Plot MSE, n = 100, N = 100
+
+k_col_m <- rep(1:k3)
+k_MSE <- rep(0, k3)
+
+mse_set <- data.frame(k_col_m, k_MSE)
+
+for(i in 1:k3){
+  mse_set[i, 2] <- knn_mse(y_p, predictions[,i])
+}
+
+plot(mse_set, xlab = "K", ylab = "MSE", main = "MSE as K varies (n = 100, N = 100)")
+
+```
+
+No, the value of $k$ is consistent with the previous sample size (minimum at $k = 11$). The MSE results are very similar overall. Based on this observation, increasing the sample size to $n = 1000$ will not have a dramatic effect past some initial improvement threshold. 
+
+### Question 7
+
+**(1) Explore the numerical values in the training dataset using your favourite tools - summary, pairs, hist, or anything else you like. Clean up the data by dealing with NAs and converting non-numerical data to numerical data when appropriate (though see part 4 of this question before doing so). Comment on any relationships and any possibly-bad datapoints**
+
+Load the data, check data set size, view columns.
+
+```{r}
+
+
+set.seed(100)
+
+L_data = read.csv("ListingsOptimization.csv")
+L_data_train = read.csv("ListingsTrain.csv")
+L_data_test = read.csv("ListingsTest.csv")
+
+nrow(L_data)
+nrow(L_data_train)
+nrow(L_data_test)
+
+```
+
+Function to summarize data: index, column name, data type, NA's (proper and text) and missing value counts. 
+
+```{r}
+
+L_data_clean<- L_data_train
+L_data_clean_test <- L_data_test
+L_data_clean_opt <- L_data
+
+summarize<-function(data){
+  index = 0
+  for(col in colnames(data)){
+  index = index + 1
+  na <- sum(is.na(data[[col]]))
+  text_na <- length(which( data[[col]] == "N/A" ))
+  missing <- length(which( data[[col]] == "" ))
+  print(paste(index, "NAME:[", col, "] TYPE:[", class(data[[col]]), "] NA:[", na, "] TEXT NA:[", text_na, "] MISSING: [", missing, "]"))
+  }
+}
+
+summarize(L_data_clean)
+
+```
+
+Clean data section by section.
+
+```{r}
+
+L_data_clean[1:5, 3:6]
+summarize(L_data_clean[, 3:6])
+
+unique(L_data_clean$host_response_time, incomparables = FALSE)
+
+unique(L_data_clean$host_response_time, incomparables = FALSE)
+
+# Convert percentages to numeric
+
+L_data_clean$host_response_rate <- str_replace(L_data_clean$host_response_rate, "[%]", "")
+L_data_clean$host_response_rate <- as.numeric(L_data_clean$host_response_rate)/100
+
+L_data_clean$host_acceptance_rate <- str_replace(L_data_clean$host_acceptance_rate, "[%]", "")
+L_data_clean$host_acceptance_rate <- as.numeric(L_data_clean$host_acceptance_rate)/100
+
+
+L_data_clean_test$host_response_rate <- str_replace(L_data_clean_test$host_response_rate, "[%]", "")
+L_data_clean_test$host_response_rate <- as.numeric(L_data_clean_test$host_response_rate)/100
+
+L_data_clean_test$host_acceptance_rate <- str_replace(L_data_clean_test$host_acceptance_rate, "[%]", "")
+L_data_clean_test$host_acceptance_rate <- as.numeric(L_data_clean_test$host_acceptance_rate)/100
+
+
+L_data_clean_opt$host_response_rate <- str_replace(L_data_clean$host_response_rate, "[%]", "")
+L_data_clean_opt$host_response_rate <- as.numeric(L_data_clean$host_response_rate)/100
+
+L_data_clean_opt$host_acceptance_rate <- str_replace(L_data_clean_opt$host_acceptance_rate, "[%]", "")
+L_data_clean_opt$host_acceptance_rate <- as.numeric(L_data_clean_opt$host_acceptance_rate)/100
+
+# Convert text NA's and missing values to NA
+
+L_data_clean$host_response_time <- ifelse(L_data_clean$host_response_time == "N/A", NA, ifelse(L_data_clean$host_response_time == "", NA, L_data_clean$host_response_time))
+
+L_data_clean_test$host_response_time <- ifelse(L_data_clean_test$host_response_time == "N/A", NA, ifelse(L_data_clean_test$host_response_time == "", NA, L_data_clean_test$host_response_time))
+
+L_data_clean_opt$host_response_time <- ifelse(L_data_clean_opt$host_response_time == "N/A", NA, ifelse(L_data_clean_opt$host_response_time == "", NA, L_data_clean_opt$host_response_time))
+
+# Convert character t/f to numeric 1/0
+
+L_data_clean$host_is_superhost <- ifelse(L_data_clean$host_is_superhost == "f", 1, 0)
+L_data_clean_test$host_is_superhost <- ifelse(L_data_clean_test$host_is_superhost == "f", 1, 0)
+L_data_clean_opt$host_is_superhost <- ifelse(L_data_clean_opt$host_is_superhost == "f", 1, 0)
+
+
+# Check finished section
+
+L_data_clean[1:5, 3:6]
+summarize(L_data_clean[,3:6])
+
+
+#-------- Clean next section
+
+L_data_clean[1:5, 7:21]
+summarize(L_data_clean[,7:21])
+
+# Convert character t/f to numeric 1/0
+
+L_data_clean$host_has_profile_pic <- ifelse(L_data_clean$host_has_profile_pic == "f", 1, 0)
+L_data_clean$host_identity_verified <- ifelse(L_data_clean$host_identity_verified == "f", 1, 0)
+
+L_data_clean_test$host_has_profile_pic <- ifelse(L_data_clean_test$host_has_profile_pic == "f", 1, 0)
+L_data_clean_test$host_identity_verified <- ifelse(L_data_clean_test$host_identity_verified == "f", 1, 0)
+
+L_data_clean_opt$host_has_profile_pic <- ifelse(L_data_clean_opt$host_has_profile_pic == "f", 1, 0)
+L_data_clean_opt$host_identity_verified <- ifelse(L_data_clean_opt$host_identity_verified == "f", 1, 0)
+
+# Drop 'bathrooms' and 'neighbourhood_group_cleansed' columns due to 100% NA, 'host_neighbourhood' due to majority missing 
+
+L_data_clean = subset(L_data_clean, select = -c(host_neighbourhood, bathrooms, neighbourhood_group_cleansed) )
+
+L_data_clean_test = subset(L_data_clean_test, select = -c(host_neighbourhood, bathrooms, neighbourhood_group_cleansed) )
+
+L_data_clean_opt = subset(L_data_clean_opt, select = -c(host_neighbourhood, bathrooms, neighbourhood_group_cleansed) )
+
+# Check finished section
+
+L_data_clean[1:5, 7:18]
+summarize(L_data_clean[,7:18])
+
+#-------- Clean next section
+
+L_data_clean[1:5, 20:26]
+summarize(L_data_clean[,20:26])
+
+# Convert character t/f to numeric 1/0
+
+L_data_clean$has_availability <- ifelse(L_data_clean$has_availability == "f", 1, 0)
+L_data_clean_test$has_availability <- ifelse(L_data_clean_test$has_availability == "f", 1, 0)
+L_data_clean_opt$has_availability <- ifelse(L_data_clean_opt$has_availability == "f", 1, 0)
+
+# Convert price to numeric
+
+L_data_clean$price <- str_replace(L_data_clean$price, "[$]", "")
+L_data_clean$price <- as.numeric(L_data_clean$price)
+
+L_data_clean_test$price <- str_replace(L_data_clean_test$price, "[$]", "")
+L_data_clean_test$price <- as.numeric(L_data_clean_test$price)
+
+L_data_clean_opt$price <- str_replace(L_data_clean_opt$price, "[$]", "")
+L_data_clean_opt$price <- as.numeric(L_data_clean_opt$price)
+
+# Check finished section
+
+L_data_clean[1:5, 20:26]
+summarize(L_data_clean[,20:26])
+
+#-------- Clean next section
+
+L_data_clean[1:5, 27:40]
+summarize(L_data_clean[,27:40])
+
+# convert missing date/description values to NA 
+
+L_data_clean$first_review <- ifelse(L_data_clean$first_review == "", NA, L_data_clean$first_review)
+L_data_clean$last_review <- ifelse(L_data_clean$last_review == "", NA, L_data_clean$last_review)
+L_data_clean$description <- ifelse(L_data_clean$description == "", NA, L_data_clean$description)
+L_data_clean$neighborhood_overview <- ifelse(L_data_clean$neighborhood_overview == "", NA, L_data_clean$neighborhood_overview)
+
+L_data_clean_test$first_review <- ifelse(L_data_clean_test$first_review == "", NA, L_data_clean_test$first_review)
+L_data_clean_test$last_review <- ifelse(L_data_clean_test$last_review == "", NA, L_data_clean_test$last_review)
+L_data_clean_test$description <- ifelse(L_data_clean_test$description == "", NA, L_data_clean_test$description)
+L_data_clean_test$neighborhood_overview <- ifelse(L_data_clean_test$neighborhood_overview == "", NA, L_data_clean_test$neighborhood_overview)
+
+L_data_clean_opt$first_review <- ifelse(L_data_clean_opt$first_review == "", NA, L_data_clean_opt$first_review)
+L_data_clean_opt$last_review <- ifelse(L_data_clean_opt$last_review == "", NA, L_data_clean_opt$last_review)
+L_data_clean_opt$description <- ifelse(L_data_clean_opt$description == "", NA, L_data_clean_opt$description)
+L_data_clean_opt$neighborhood_overview <- ifelse(L_data_clean_opt$neighborhood_overview == "", NA, L_data_clean_opt$neighborhood_overview)
+
+# Convert character t/f to numeric 1/0
+
+L_data_clean$instant_bookable <- ifelse(L_data_clean$instant_bookable == "f", 1, 0)
+
+L_data_clean_test$instant_bookable <- ifelse(L_data_clean_test$instant_bookable == "f", 1, 0)
+
+L_data_clean_opt$instant_bookable <- ifelse(L_data_clean_opt$instant_bookable == "f", 1, 0)
+
+# Explore relationship between listing count variables
+
+plot(L_data_clean$host_listings_count, L_data_clean$calculated_host_listings_count)
+
+plot(L_data_clean$calculated_host_listings_count, L_data_clean$calculated_host_listings_count_entire_homes + L_data_clean$calculated_host_listings_count_private_rooms)
+
+plot(L_data_clean$host_listings_count, L_data_clean$host_total_listings_count)
+
+# remove redundant host_total_listings_count
+
+L_data_clean = subset(L_data_clean, select = -c(host_total_listings_count) )
+
+L_data_clean_test = subset(L_data_clean_test, select = -c(host_total_listings_count) )
+
+L_data_clean_opt = subset(L_data_clean_opt, select = -c(host_total_listings_count) )
+
+# check unique values for some categorical variables (error check, cardinality check)
+
+unique(L_data_clean$neighbourhood_cleansed, incomparables = FALSE)
+unique(L_data_clean$room_type, incomparables = FALSE)
+unique(L_data_clean$property_type, incomparables = FALSE)
+
+# Check finished section
+
+L_data_clean[1:5, 27:39]
+summarize(L_data_clean[,27:39])
+
+#------- Check full cleaned data set 
+
+summarize(L_data_clean)
+
+```
+
+Explore the data.
+
+```{r}
+
+pie(table(L_data_clean$room_type), radius=1, main = "Room Type")
+
+par(mfrow=c(2,3))
+
+hist(L_data_clean$price, xlab = "Price")
+boxplot(price~bedrooms, data=L_data_clean)
+hist(L_data_clean$review_scores_rating, xlab = "Review Rating")
+plot(L_data_clean$review_scores_rating, L_data_clean$price, xlab = "Review Rating", ylab = "Price")
+plot(L_data_clean$minimum_nights, L_data_clean$price, xlab = "Minimum Nights", ylab = "Price")
+pie(table(L_data_clean$bedrooms), radius=1, main = "Bedrooms")
+
+```
+
+All t/f binary values were converted to dummy variables {$0,1$}. Some numerical values were a character data type - these were converted to numeric (percentages, dollars). Some values were an "N/A" character - these were converted to NA. All missing values were also converted to NA. All NA values in numeric columns were then converted to the mean for the column (below).Several columns were dropped: 'bathrooms' and 'neighbourhood_group_cleansed' columns due to 100% NA, host_neighbourhood' due to >85% missing values, and 'host_total_listings_count' because it was redunant (column 'host_listing_counts' had same values). All unique values for categorical variables were checked for entry errors. I decided against one-hot-encoding for low-cardinality variables for now. 
+
+Some bad data points were detected, for instance, 'minimum_nights' has a few values in the 1000's which I assume to be entry error. Price has a few outlier values, there are a few price points that are >6000, which could possibly be an entry error. There are some lower price outliers <800 that I don't assume are errors. There is a strange 'calculated' listing counts column that has some outlier values when plotted against 'listing counts'. For instance, there is a 'host_listing_count' >250 that has a calculated value of ~70. Another has 100 'listing counts' yet few 'calculated' listing counts. These could be entry error as well.    
+
+**(2) You should have found some suspicious datapoints in the first part of this question. Create two copies of the dataset: one with the suspicious points removed, the other with them retained. Try training both LASSO and standard regression models on the training dataset using the numerical covariates, optimizing the parameters using crossvalidation with the optimization dataset. In the end you should have four models: standard and LASSO regression, with and without suspicious points. Test their accuracy on the test dataset.**
+
+I will first start by removing only the extreme price points and minimum night points. 
+
+```{r}
+
+# create separate data set with bad points removed 
+L_data_clean_r <- L_data_clean
+
+L_data_clean_r$price <- ifelse(L_data_clean_r$price > 1000, NA, L_data_clean_r$price)
+L_data_clean_r$minimum_nights <- ifelse(L_data_clean_r$minimum_nights > 400, mean(L_data_clean_r$minimum_nights), L_data_clean_r$minimum_nights)
+
+# view tables with values removed
+
+par(mfrow=c(2,3))
+
+hist(L_data_clean_r$price, xlab = "Price")
+boxplot(price~bedrooms, data=L_data_clean_r)
+hist(L_data_clean_r$review_scores_rating, xlab = "Review Rating")
+plot(L_data_clean_r$review_scores_rating, L_data_clean_r$price, xlab = "Review Rating", ylab = "Price")
+plot(L_data_clean_r$minimum_nights, L_data_clean_r$price, xlab = "Minimum Nights", ylab = "Price")
+pie(table(L_data_clean_r$bedrooms), radius=1, main = "Bedrooms")
+
+# replace NA values with mean
+
+for(i in 1:ncol(L_data_clean_r)){
+  if(class(L_data_clean_r[,i]) != "character"){
+    L_data_clean_r[is.na(L_data_clean_r[,i]), i] <- mean(L_data_clean_r[,i], na.rm = TRUE)
+  }
+}
+summarize(L_data_clean_r)
+
+for(i in 1:ncol(L_data_clean)){
+  if(class(L_data_clean[,i]) != "character"){
+    L_data_clean[is.na(L_data_clean[,i]), i] <- mean(L_data_clean[,i], na.rm = TRUE)
+  }
+}
+#summarize(L_data_clean)
+
+for(i in 1:ncol(L_data_clean_test)){
+  if(class(L_data_clean_test[,i]) != "character"){
+    L_data_clean_test[is.na(L_data_clean_test[,i]), i] <- mean(L_data_clean_test[,i], na.rm = TRUE)
+  }
+}
+#summarize(L_data_clean_test)
+
+for(i in 1:ncol(L_data_clean_opt)){
+  if(class(L_data_clean_opt[,i]) != "character"){
+    L_data_clean_opt[is.na(L_data_clean_opt[,i]), i] <- mean(L_data_clean_opt[,i], na.rm = TRUE)
+  }
+}
+#summarize(L_data_clean_opt)
+```
+
+```{r}
+
+L_data_clean_r_all <- L_data_clean_r
+L_data_clean_test_all <- L_data_clean_test
+L_data_clean_opt_all <- L_data_clean_opt
+
+# remove non-numeric columns 
+
+L_data_clean = subset(L_data_clean, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review) )
+
+L_data_clean_r = subset(L_data_clean_r, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review) )
+
+L_data_clean_test = subset(L_data_clean_test, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review) )
+
+L_data_clean_opt = subset(L_data_clean_opt, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review) )
+
+```
+
+**Train using LASSO and CV on L_data_clean (dataset without points removed.)**
+
+```{r}
+
+x = model.matrix(price~.,data=L_data_clean)
+y = L_data_clean$price
+
+
+x_opt = model.matrix(price~.,data=L_data_clean_opt)
+y_opt = L_data_clean_opt$price
+
+fit_lasso = glmnet(x, y, alpha = 1)
+
+cv_lasso = cv.glmnet(x_opt, y_opt, alpha = 1)
+
+plot(cv_lasso)
+
+coef(cv_lasso, s = "lambda.min")
+
+min <- cv_lasso$lambda.min 
+
+lasso_predictions <- predict(fit_lasso, newx = model.matrix(price~.,data=L_data_clean_test), s = min)
+
+RMSE(lasso_predictions, L_data_clean_test$price)
+```
+
+**Train using LASSO and CV on L_data_clean_r (dataset with points removed.)**
+
+```{r}
+
+x_r = model.matrix(price~.,data=L_data_clean_r)
+y_r = L_data_clean_r$price
+
+
+x_opt_r = model.matrix(price~.,data=L_data_clean_opt)
+y_opt_r = L_data_clean_opt$price
+
+fit_lasso_r = glmnet(x_r, y_r, alpha = 1)
+
+cv_lasso_r = cv.glmnet(x_opt_r, y_opt_r, alpha = 1)
+
+plot(cv_lasso_r)
+
+coef(cv_lasso_r, s = "lambda.min")
+
+min_r <- cv_lasso_r$lambda.min 
+
+lasso_predictions_r <- predict(fit_lasso_r, newx = model.matrix(price~.,data=L_data_clean_test), s = min_r)
+
+RMSE(lasso_predictions_r, L_data_clean_test$price)
+```
+
+**Train using Linear Regression on L_data_clean (dataset without points removed.)**
+
+```{r}
+
+fit_lm = lm(price~., data = L_data_clean)
+
+predictions_lm = predict(fit_lm, data = L_data_clean_test)
+predictions_lm[1:10]
+
+RMSE(predictions_lm, L_data_clean_test$price)
+
+summary(fit_lm)
+#attach(L_data_clean)
+
+par(mfrow=c(2,2))
+plot(fit_lm)
+
+```
+
+**Train using Linear Regression on L_data_clean_r (dataset with points removed.)**
+
+```{r}
+
+fit_lm_r = lm(price~., data = L_data_clean_r)
+
+predictions_lm_r = predict(fit_lm_r, data = L_data_clean_test)
+predictions_lm_r[1:10]
+
+RMSE(predictions_lm_r, L_data_clean_test$price)
+
+summary(fit_lm_r)
+
+par(mfrow=c(2,2))
+plot(fit_lm_r)
+```
+
+**(3) Which of the models in the previous question is best? Was it OK to remove the suspicious datapoints from the training dataset? Were the error estimates from the optimization dataset accurate?**
+
+The best model, based on $RMSE = 64.2$, is the LASSO model fit on the data set with outliers removed, with Lambda chosen based on cross-validated errors on the optimized data set. The second best performing model is the linear regression fit on the data set with outliers removed, with $RMSE = 90.5$. 
+
+Based on the lower error on both models using the modified data set, as well as the linear coefficients having statistically significant values once the extreme outliers were removed, it was OK to remove them. The outliers skewed the regression line and produced a model with $Adjusted R^2 = -0.009605$, implying the variables do not have any association with the dependent variable (price). The model without these points has $Adjusted R^2 = 0.2937$, which indicates there is some relationship between the variables and price. 
+
+No, the optimization dataset did not accurately estimate the model errors. Looking at the CV plots, the error estimates are very close for both fits, yet their actual test errors are quite different (159.9 compared to 64.2).
+
+
+**(4) Some of the features, such as “description” and “amenities,” are text fields or text lists. Choose a collection of words** $W$ **that appear somewhere in these variables. For each word** $w ∈ W$**, create a** ${0, 1}$**-valued dummy variable that indicates the presence of a given word in a given listing’s text field. For a word w, denote by** $p(w)$ **the percentage of listings containing that word. Denote by n the number of listings in the training set. Ensure that your collection of words** $W$ **satisfies:**
+
+**(a)** $\sum_w ∈ W p(w) ≥ \frac{n}{2}$
+
+**(b)** $|W| ≥ 12$ **(that is, there are many words in the collection).**
+
+**(c) Very common words such as “the” or “and” should not appear in the collection.**
+
+```{r}
+
+library(stringr)
+
+desc <- L_data_clean_r_all$description
+amen <- L_data_clean_r_all$amenities
+amen[1:3]
+
+clean <- function(string){
+    temp <- tolower(string)
+    temp <- stringr::str_replace_all(temp,"[^a-zA-Z\\s]", " ")
+    temp <- stringr::str_replace_all(temp,"[\\s]+", " ")
+    temp <- stringr::str_split(temp, " ")[[1]]
+    indexes <- which(temp == "")
+    if(length(indexes) > 0){
+      temp <- temp[-indexes]
+    } 
+    return(temp)
+}
+
+# concatenate first 12 posts
+
+d <- paste(desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], desc[11], desc[12])
+s <- paste(amen[1], amen[2], amen[3], amen[4], amen[5], amen[6], amen[7], amen[8], amen[9], amen[10], amen[11], amen[12])
+
+clean_s <- clean(s)
+
+# remove words length < 4
+
+for(i in 1:length(clean_s)){
+  if(nchar(clean_s[i]) < 4){
+    clean_s[i] <- NA
+  }
+}
+
+clean_s <- clean_s[-which(is.na(clean_s))]
+
+# get unique words 
+
+clean_u <- unique(clean_s)
+clean_u
+
+```
+
+```{r}
+
+n_col <- length(clean_u) + 1
+
+# create frequency matrix and load amenitites data
+
+m <- matrix(nrow=1002,ncol=n_col)
+m[2:1001,1] <- amen
+m[1,2:n_col] <- clean_u
+
+# count frequency for each word and post
+
+for(j in 2:1001){
+  for(i in 2:n_col){
+    m[j,i] <- sum(grepl(m[1,i], m[j,1]))
+  }
+}
+for(i in 2:n_col){
+  
+  m[1002,i] <- length(m[,i][which(m[,i] == "1")])
+}
+
+# view total frequencies of words
+
+view <- matrix(nrow = 2, ncol = n_col)
+view[1,] <- m[1,]
+view[2,] <- m[1002,]
+view
+
+# pick top words >500
+
+view[, c(4,10,11,14,16,21,22,25,31,41,49,52,89)]
+
+
+```
+
+```{r}
+
+# create dummy variables in original file 
+
+L_data_clean_r_all[m[1,c(4,10,11,14,16,21,22,25,31,41,49,52,89)]] <- m[2:1001, c(4,10,11,14,16,21,22,25,31,41,49,52,89)]
+L_data_clean_r_all = subset(L_data_clean_r_all, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review))
+L_data_clean_r_all[1:5,]
+
+```
+
+**(5) Repeat model-training for both standard and LASSO regression on this larger collection of covariates (with outliers removed or not per the results of the previous part of the question). How do the results change?**
+
+```{r}
+
+# add dummy variables to test set 
+
+amen_t <- L_data_clean_test_all$amenities
+
+# create frequency matrix and load amenitites data from test set 
+
+m_t <- matrix(nrow=673,ncol=n_col)
+m_t[2:672,1] <- amen_t
+m_t[1,2:n_col] <- clean_u
+
+# count frequency for each word and post
+
+for(j in 2:672){
+  for(i in 2:n_col){
+    m_t[j,i] <- sum(grepl(m_t[1,i], m_t[j,1]))
+  }
+}
+
+# add dummy variables to original set 
+
+L_data_clean_test_all[m_t[1,c(4,10,11,14,16,21,22,25,31,41,49,52,89)]] <- m_t[2:672, c(4,10,11,14,16,21,22,25,31,41,49,52,89)]
+L_data_clean_test_all = subset(L_data_clean_test_all, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review))
+L_data_clean_test_all[1:5,]
+
+```
+
+
+```{r}
+
+# add dummy variables to opt set 
+
+amen_o <- L_data_clean_opt_all$amenities
+
+# create frequency matrix and load amenitites data from opt set 
+
+m_o <- matrix(nrow=1002,ncol=n_col)
+m_o[2:1001,1] <- amen_o
+m_o[1,2:n_col] <- clean_u
+
+# count frequency for each word and post
+
+for(j in 2:1001){
+  for(i in 2:n_col){
+    m_o[j,i] <- sum(grepl(m_o[1,i], m_o[j,1]))
+  }
+}
+
+# add dummy variables to original set 
+
+L_data_clean_opt_all[m_o[1,c(4,10,11,14,16,21,22,25,31,41,49,52,89)]] <- m_o[2:1001, c(4,10,11,14,16,21,22,25,31,41,49,52,89)]
+L_data_clean_opt_all = subset(L_data_clean_opt_all, select = -c(description, neighborhood_overview, host_response_time, neighbourhood_cleansed, property_type, room_type, amenities, first_review, last_review))
+L_data_clean_opt_all[1:5,]
+```
+
+
+**Train using LASSO and CV on L_data_clean_r_all (dataset with outlier points removed and all dummy variables included.)**
+
+```{r}
+
+# fit Lasso with CV model (modified set including dummy variables)
+
+x_r2 = model.matrix(price~.,data=L_data_clean_r_all)
+y_r2 = L_data_clean_r_all$price
+
+x_opt_r2 = model.matrix(price~.,data=L_data_clean_opt_all)
+y_opt_r2 = L_data_clean_opt_all$price
+ 
+fit_lasso_r2 = glmnet(x_r2, y_r2, alpha = 1)
+
+cv_lasso_r2 = cv.glmnet(x_opt_r2, y_opt_r2, alpha = 1)
+
+plot(cv_lasso_r2)
+ 
+min_r2 <- cv_lasso_r2$lambda.min 
+
+coef(cv_lasso_r2, s = "lambda.min")
+
+lasso_predictions_r2 <- predict(fit_lasso_r2, newx = model.matrix(price~.,data=L_data_clean_test_all), s = min_r2)
+
+RMSE(lasso_predictions_r2, L_data_clean_test$price)
+
+```
+
+**Train using Linear Regression on L_data_clean_r_all (dataset with outlier points removed and all dummy variables included.)**
+
+```{r}
+
+# fit linear model (modified set including dummy variables)
+
+fit_lm_r2 = lm(price~., data = L_data_clean_r_all)
+ 
+predictions_lm_r2 = predict(fit_lm_r2, data = L_data_clean_test_all)
+ 
+RMSE(predictions_lm_r2, L_data_clean_test_all$price)
+ 
+summary(fit_lm_r2)
+par(mfrow=c(2,2))
+plot(fit_lm_r2)
+
+```
+
+Surprisingly, the results are a little bit worse with linear regression despite several of the new variables having p-values $<0.05$. For linear regression, the error went from $90.5$ to $~92$. Looking at the coefficients for some of the variables, many of the amenitities are associated negatively with price, like 'silverware'. It is statistically significant ($p-value = 0.007$), but seems to be associated with lower-priced units. Adding the dummy variables reduced the influence of 'review_scores_value' from $p = 0.00056$ to $0.004$. It is still significant, but perhaps some of the 'value' is reflective of the amenities. 
+
+For Lasso, the error decreased. It was $RMSE = 64$ before adding the amenities dummy variables, and after it is $62.3$. It gave significance to different amenities: parking (negative), 'allowed'(negative), and conditioning (positive). There is not a lot of difference in predictive accuracy with the addition of the new variables. 
+
+### Question 8
+
+**In this question, you will consider the “ridge” and “LASSO” penalties for the usual linear regression model:**
+
+$$Y_i = β_0 + β_1X_i + \varepsilon_i$$
+
+**(1) Show that, for any dataset** $(X_1, Y_1), . . . ,(X_n, Y_n)$**, there exists some finite value Λ so that for all choices of hyperparameter** $λ > Λ$**, the coefficients estimated by LASSO regression will all be exactly** $0$**.**
+
+Referring to the textbook page 225, formulas 6.14 and 6.15 show a version of the Lasso and Ridge coefficient estimations under the following simplifying assumptions: 
+
+$n = p$,
+
+$B_0 = 0$ (No intercept estimation),
+
+and a simplified data matrix $X$ with 1's along the diagonal and 0's otherwise.  
+
+$β_j^R = y_j/(1 + λ)$
+
+
+$β_j^L =$
+
+   $y_j − \frac{λ}{2}$ if $y_j > \frac{λ}{2}$
+   
+   $y_j + \frac{λ}{2}$ if $y_j < -\frac{λ}{2}$
+   
+   $0$ if $|y_j| ≤ \frac{λ}{2}$
+
+
+Take some arbitrary data set $X$ with points $(X_1,Y_1),...,(X_n,Y_n)$, given the conditions above, and for any value $y_j \in X$ there exists a value $Λ = 2|y_j|$. This value $Λ$ is the minimum value for $β_j^L = 0$ according to the above identities, and so it holds that for any value $λ > Λ$, $β_j^L = 0$. 
+
+According to the authors of the textbook, this applies to data sets beyond these assumptions - i.e. including an intercept and additional coefficient parameters.
+
+I will attempt to show this: 
+
+For a standard linear model  
+
+$$Y = β_0 + β_1X + \epsilon$$
+
+Ridge minimizes RSS subject to a lambda penalty term: 
+
+$$\sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2 + \lambda\hat{|\beta|}_1$$
+
+Take partial derivative with respect to $β_0^R$: 
+
+$$\frac{\partial}{\partial \hat{\beta}_0} \sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2  + \frac{\partial}{\partial \hat{\beta}_0} \lambda\hat{|\beta|}_1 = -2\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{|\beta|}_1$$
+
+Take partial derivative with respect to $β_1^R$: 
+
+$$\frac{\partial}{\partial \hat{\beta}_1} \sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2  + \frac{\partial}{\partial \hat{\beta}_1} \lambda\hat{|\beta|}_1 = -2\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{\frac{\beta_1}{|\beta|}}_1$$
+
+Set to 0: 
+
+$$-2\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{|\beta|}_1 = 0$$
+
+$$-2\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{\frac{\beta_1}{|\beta|}}_1 = 0$$
+
+Divide by -2: 
+
+$$\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) -\frac{1}{2}\lambda\hat{|\beta_1|} = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)  -\frac{1}{2}\lambda\hat{\frac{\beta_1}{|\beta_1|}} = 0$$
+
+Solving for $β_0^R$: 
+
+$\hat{\beta}_0^R = \bar{Y} - \hat{\beta_1}\bar{X} -\frac{1}{2n}\lambda\hat{|\beta|}_1$
+
+Solving for $β_1^R$ (by substituting $β_0^R$ and distributing the summation):
+
+$$\sum_{i=1}^{n} X_i(Y_i - (\bar{Y} - \hat{\beta_1}\bar{X} -\frac{1}{2n}\lambda\hat{|\beta_1|}) - \hat{\beta}_1X_i)  -\frac{1}{2}\lambda\hat{\frac{\beta_1}{|\beta_1|}} = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) + \sum_{i=1}^{n} X_i\frac{1}{2n}\lambda\hat{|\beta_1|} - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) -\frac{1}{2}\lambda\hat{\frac{\beta_1}{|\beta_1|}} = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) + \bar{X}\frac{1}{2}\lambda\hat{|\beta_1|} - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) -\frac{1}{2}\lambda\hat{\frac{\beta}{|\beta_1|}} = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) - \lambda\frac{1}{2} (\bar{X}\hat{|\beta_1|} + \hat{\frac{\beta_1}{|\beta_1|}}) = 0$$
+
+$$\hat{\beta}_1 \sum_{i=1}^{n} X_i (X_i - \bar{X}) - \lambda\frac{1}{2} (\bar{X}\hat{|\beta_1|} + \hat{\frac{\beta_1}{|\beta_1|}}) = \sum_{i=1}^{n} X_i(Y_i - \bar{Y} )$$
+
+Multiple the fraction by $frac{\hat{\beta}_1}{\hat{\beta}_1}$:
+
+$$\hat{\beta}_1 \sum_{i=1}^{n} X_i (X_i - \bar{X}) - \lambda\frac{1}{2} (\bar{X}\hat{|\beta_1|} + 1) = \sum_{i=1}^{n} X_i(Y_i - \bar{Y} )$$
+$$\hat{\beta}_1 \sum_{i=1}^{n} X_i (X_i - \bar{X}) = \sum_{i=1}^{n} X_i(Y_i - \bar{Y}) + \lambda\frac{1}{2} (\bar{X}\hat{|\beta_1|} + 1)$$
+Dividing out: 
+
+$$\hat{\beta}_1^L = \frac{\sum_{i=1}^{n} X_i(Y_i - \bar{Y}) + \lambda\frac{1}{2} (\bar{X}\hat{|\beta_1|} + 1)}{\sum_{i=1}^{n} X_i (X_i - \bar{X})}$$
+The above formula illustrates that when $\lambda = 0$, the coefficient is the same as the ordinary least squares estimator.
+
+
+**(2) Show that the above is not true for Ridge regression. That is, show that there exists some dataset** $(X_1, Y_1), . . . ,(X_n, Y_n)$ **so that for any finite value of hyperparameter** $λ$**, the coefficients estimated by ridge regression will not all be exactly 0.**
+
+Given that the value $λ$ is in the denominator of $β_j^R = y_j/(1 + λ)$, it is impossible that the coefficient will be zero as a result of varying $λ$ (it can be zero based on the value of $y_j$, but this is independent of $λ$). 
+
+However, I will show this applies to all data sets (not just with the above assumptions) and derive estimators for $β_0^R$ and $β_1^R$ following ordinary least squares with the added penalty term.  
+
+For a standard linear model  
+
+$$Y = β_0 + β_1X + \epsilon$$
+
+Ridge minimizes RSS subject to a lambda penalty term: 
+
+$$\sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2 + \lambda\hat{\beta}_1^2$$
+
+Take partial derivative with respect to $β_0^R$: 
+
+$$\frac{\partial}{\partial \hat{\beta}_0} \sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2  + \frac{\partial}{\partial \hat{\beta}_0} \lambda\hat{\beta}_1^2 = -2\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{\beta}_1^2$$
+
+Take partial derivative with respect to $β_1^R$: 
+
+$$\frac{\partial}{\partial \hat{\beta}_1} \sum_{i=1}^{n} (Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i)^2  + \frac{\partial}{\partial \hat{\beta}_1} \lambda\hat{\beta}_1^2 = -2\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +2\lambda\hat{\beta}_1$$
+
+Set to 0: 
+
+$$-2\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +\lambda\hat{\beta}_1^2 = 0$$
+
+$$-2\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) +2\lambda\hat{\beta}_1 = 0$$
+
+Divide by -2: 
+
+$$\sum_{i=1}^{n}(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) -\frac{1}{2}\lambda\hat{\beta}_1^2 = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \hat{\beta}_0 - \hat{\beta}_1X_i) - \lambda\hat{\beta}_1 = 0$$
+
+Solving for $β_0^R$: 
+
+$\hat{\beta}_0^R = \bar{Y} - \hat{\beta_1}\bar{X} -\frac{1}{2n}\lambda\hat{\beta}_1^2$
+
+Solving for $β_1^R$ (by substituting $β_0^R$ and distributing the summation):
+
+$$\sum_{i=1}^{n} X_i(Y_i - (\bar{Y} - \hat{\beta_1}\bar{X} -\frac{1}{2n}\lambda\hat{\beta}_1^2) - \hat{\beta}_1X_i) - \lambda\hat{\beta}_1 = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) + \sum_{i=1}^{n} X_i\frac{1}{2n}\lambda\hat{\beta}_1^2 - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) - \lambda\hat{\beta}_1 = 0$$
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) + \frac{1}{2}\bar{X}\lambda\hat{\beta}_1^2 - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) - \lambda\hat{\beta}_1 = 0$$
+
+Take a data set $D = {(1,2), (3,5), (4,3), (5,4), (2,6)}$, then, 
+
+$$\sum_{i=1}^{n} X_i(Y_i - \bar{Y} ) + \frac{1}{2}\bar{X}\lambda\hat{\beta}_1^2 - \sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) - \lambda\hat{\beta}_1 = 0$$
+
+$\bar{X} = 3$
+
+$\bar{Y} = 4$
+
+$\sum_{i=1}^{n} X_i(Y_i - \bar{Y}) =  1$
+
+$\sum_{i=1}^{n}\hat{\beta}_1 X_i (X_i - \bar{X}) = 3\hat{\beta}_1$
+
+$\frac{1}{2}\bar{X}\lambda\hat{\beta}_1^2 = \frac{3}{2}\lambda\hat{\beta}_1^2$
+
+
+
+$$1 + \frac{3}{2}\lambda\hat{\beta}_1^2 - 3\hat{\beta}_1 - \lambda\hat{\beta}_1 = 0$$
+$$\hat{\beta}_1(\lambda(\frac{3}{2}\hat{\beta}_1 - 1) - 3)= -1$$
+
+If $\lambda = 0$, then $\hat{\beta}_1 = \frac{1}{3}$
+
+If $\hat{\beta}_1 = 0$, then 
+
+$$(0)(\lambda(\frac{3}{2}(0) - 1) - 3)= -1 = 0$$ 
+
+$-1 = 0$ is a contradiction, therefore $\hat{\beta}_1 \neq 0$ for any value $\lambda$. 
